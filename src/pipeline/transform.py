@@ -1,7 +1,13 @@
 from pathlib import Path
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col
+from pyspark.sql.functions import (
+    col,
+    count,
+    countDistinct,
+    sum as spark_sum,
+    when,
+)
 from pyspark.sql.types import (
     StructType,
     StructField,
@@ -28,14 +34,12 @@ SALES_SCHEMA = StructType(
 )
 
 
+
 def validate_data(df):
-    """Validate incoming sales data before transformation."""
+    """Validate incoming sales data using a single Spark aggregation."""
 
     print("\n========== DATA QUALITY CHECKS ==========")
 
-    errors = []
-
-    # 1. Check for null values
     critical_columns = [
         "order_id",
         "customer_id",
@@ -46,51 +50,85 @@ def validate_data(df):
         "region",
     ]
 
+    # Build all validation metrics into one aggregation.
+    validation_expressions = []
+
+    for column in critical_columns:
+        validation_expressions.append(
+            spark_sum(
+                when(col(column).isNull(), 1).otherwise(0)
+            ).alias(f"null_{column}")
+        )
+
+    validation_expressions.extend([
+        count("order_id").alias("total_order_ids"),
+        countDistinct("order_id").alias("distinct_order_ids"),
+
+        spark_sum(
+            when(col("quantity") <= 0, 1).otherwise(0)
+        ).alias("invalid_quantities"),
+
+        spark_sum(
+            when(col("unit_price") < 0, 1).otherwise(0)
+        ).alias("negative_prices"),
+    ])
+
+    # One Spark action executes all aggregation expressions.
+    metrics = df.agg(*validation_expressions).first()
+
+    errors = []
+
     print("\n1. Checking null values...")
 
     for column in critical_columns:
-        null_count = df.filter(col(column).isNull()).count()
+        null_count = metrics[f"null_{column}"]
 
         if null_count > 0:
-            errors.append(f"{column}: {null_count} null values found")
+            errors.append(
+                f"{column}: {null_count} null values found"
+            )
             print(f"   FAILED: {column} has {null_count} null values")
         else:
             print(f"   PASSED: {column}")
 
-    # 2. Check duplicate order IDs
     print("\n2. Checking duplicate order IDs...")
 
-    duplicate_count = df.groupBy("order_id").count().filter(col("count") > 1).count()
+    duplicate_count = (
+        metrics["total_order_ids"] - metrics["distinct_order_ids"]
+    )
 
     if duplicate_count > 0:
-        errors.append(f"{duplicate_count} duplicate order IDs found")
-        print(f"   FAILED: {duplicate_count} duplicate order IDs")
+        errors.append(
+            f"{duplicate_count} duplicate order ID occurrences found"
+        )
+        print(f"   FAILED: {duplicate_count} duplicate occurrences")
     else:
         print("   PASSED: No duplicate order IDs")
 
-    # 3. Check invalid quantities
     print("\n3. Checking quantities...")
 
-    invalid_quantity = df.filter(col("quantity") <= 0).count()
+    invalid_quantity = metrics["invalid_quantities"]
 
     if invalid_quantity > 0:
-        errors.append(f"{invalid_quantity} invalid quantities found")
+        errors.append(
+            f"{invalid_quantity} invalid quantities found"
+        )
         print(f"   FAILED: {invalid_quantity} invalid quantities")
     else:
         print("   PASSED: All quantities are valid")
 
-    # 4. Check invalid prices
     print("\n4. Checking unit prices...")
 
-    invalid_price = df.filter(col("unit_price") < 0).count()
+    invalid_price = metrics["negative_prices"]
 
     if invalid_price > 0:
-        errors.append(f"{invalid_price} negative unit prices found")
+        errors.append(
+            f"{invalid_price} negative unit prices found"
+        )
         print(f"   FAILED: {invalid_price} negative prices")
     else:
         print("   PASSED: All unit prices are valid")
 
-    # 5. Final validation result
     print("\n==========================================")
 
     if errors:
@@ -99,7 +137,9 @@ def validate_data(df):
         for error in errors:
             print(f"- {error}")
 
-        raise ValueError("Pipeline stopped due to data quality issues.")
+        raise ValueError(
+            "Pipeline stopped due to data quality issues."
+        )
 
     print("\nALL DATA QUALITY CHECKS PASSED!")
     print("==========================================\n")
