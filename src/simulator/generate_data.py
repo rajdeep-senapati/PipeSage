@@ -23,7 +23,7 @@ COLUMNS = [
     "product", "quantity", "unit_price", "region",
 ]
 
-def generate_sales_data(scenario="clean"):
+def generate_sales_data(scenario="clean", output_dir=OUTPUT_DIR):
     data = [list(row) for row in SALES_DATA]
 
     if scenario == "null_customer":
@@ -39,7 +39,7 @@ def generate_sales_data(scenario="clean"):
     elif scenario == "negative_quantity":
         data[1][4] = -2
 
-    output_file = OUTPUT_DIR / scenario / "sales.csv"
+    output_file = output_dir / scenario / "sales.csv"
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
     with output_file.open("w", newline="", encoding="utf-8") as file:

@@ -1,5 +1,5 @@
 import pytest
-
+from src.simulator.generate_data import generate_sales_data
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, lit, when
 
@@ -116,3 +116,34 @@ def test_invalid_date_is_rejected(spark, tmp_path):
 
     with pytest.raises(ValueError, match="data quality issues"):
         validate_data(invalid_df)
+
+@pytest.mark.parametrize(
+    "scenario, should_pass",
+    [
+        ("clean", True),
+        ("null_customer", False),
+        ("duplicate_order", False),
+        ("zero_quantity", False),
+        ("negative_price", False),
+        ("invalid_date", False),
+        ("negative_quantity", False),
+    ],
+)
+def test_simulated_scenarios(spark, tmp_path, scenario, should_pass):
+    generate_sales_data(scenario, output_dir=tmp_path)
+
+    input_file = tmp_path / scenario / "sales.csv"
+
+    simulated_df = (
+        spark.read
+        .option("header", True)
+        .option("dateFormat", "yyyy-MM-dd")
+        .schema(SALES_SCHEMA)
+        .csv(str(input_file))
+    )
+
+    if should_pass:
+        validate_data(simulated_df)
+    else:
+        with pytest.raises(ValueError, match="data quality issues"):
+            validate_data(simulated_df)
