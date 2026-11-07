@@ -146,10 +146,19 @@ def validate_data(df):
     logger.info("All data quality checks passed")
 
 
-def run_pipeline(scenario="clean"):
+def run_pipeline(scenario="clean", input_path=None, output_path=None):
 
-    input_file = SIMULATED_DIR / scenario / "sales.csv"
-    output_dir = OUTPUT_DIR / scenario
+    input_file = (
+        Path(input_path)
+        if input_path
+        else SIMULATED_DIR / scenario / "sales.csv"
+    )
+
+    output_dir = (
+        Path(output_path)
+        if output_path
+        else OUTPUT_DIR / scenario
+    )
 
     logger.info("Starting PipeSage ETL pipeline | Scenario: %s", scenario)
 
@@ -221,5 +230,21 @@ if __name__ == "__main__":
         default="clean",
     )
 
+    parser.add_argument(
+    "--input",
+    type=Path,
+    help="Custom input CSV file path",
+    )
+
+    parser.add_argument(
+    "--output",
+    type=Path,
+    help="Custom output directory path",
+    )
+
     args = parser.parse_args()
-    run_pipeline(args.scenario)
+    run_pipeline(
+    scenario=args.scenario,
+    input_path=args.input,
+    output_path=args.output,
+    )
