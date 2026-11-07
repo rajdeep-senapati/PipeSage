@@ -36,6 +36,8 @@ def generate_sales_data(scenario="clean"):
         data[2][5] = -1800.00
     elif scenario == "invalid_date":
         data[3][2] = "not-a-date"
+    elif scenario == "negative_quantity":
+        data[1][4] = -2
 
     output_file = OUTPUT_DIR / scenario / "sales.csv"
     output_file.parent.mkdir(parents=True, exist_ok=True)
