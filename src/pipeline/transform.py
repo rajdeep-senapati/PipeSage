@@ -30,6 +30,7 @@ SCENARIOS = [
     "zero_quantity",
     "negative_price",
     "invalid_date",
+    "negative_quantity",
 ]
 
 SALES_SCHEMA = StructType([

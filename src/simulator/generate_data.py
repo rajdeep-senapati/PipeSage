@@ -55,7 +55,7 @@ if __name__ == "__main__":
         "--scenario",
         choices=[
             "clean", "null_customer", "duplicate_order",
-            "zero_quantity", "negative_price", "invalid_date",
+            "zero_quantity", "negative_price", "invalid_date","negative_quantity",
         ],
         default="clean",
     )
