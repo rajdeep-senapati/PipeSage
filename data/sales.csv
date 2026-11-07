@@ -1,0 +1,11 @@
+order_id,customer_id,order_date,product,quantity,unit_price,region
+1,101,2026-10-01,Laptop,1,55000.0,East
+2,102,2026-10-01,Mouse,2,750.0,West
+3,103,2026-10-02,Keyboard,1,1800.0,North
+4,104,2026-10-02,Monitor,2,12000.0,South
+5,105,2026-10-03,Laptop,1,62000.0,East
+6,101,2026-10-03,Mouse,3,750.0,East
+7,106,2026-10-04,Keyboard,2,1800.0,West
+8,107,2026-10-04,Monitor,1,12000.0,North
+9,108,2026-10-05,Laptop,1,58000.0,South
+10,102,2026-10-05,Mouse,1,750.0,West
