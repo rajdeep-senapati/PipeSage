@@ -1,3 +1,4 @@
+import argparse
 from pathlib import Path
 
 from pyspark.sql import SparkSession
@@ -20,19 +21,26 @@ from pyspark.sql.types import (
 BASE_DIR = Path(__file__).resolve().parents[2]
 INPUT_FILE = BASE_DIR / "data" / "sales.csv"
 OUTPUT_DIR = BASE_DIR / "data" / "processed_sales"
+SIMULATED_DIR = BASE_DIR / "data" / "simulated"
 
-SALES_SCHEMA = StructType(
-    [
-        StructField("order_id", IntegerType(), True),
-        StructField("customer_id", IntegerType(), True),
-        StructField("order_date", DateType(), True),
-        StructField("product", StringType(), True),
-        StructField("quantity", IntegerType(), True),
-        StructField("unit_price", DoubleType(), True),
-        StructField("region", StringType(), True),
-    ]
-)
+SCENARIOS = [
+    "clean",
+    "null_customer",
+    "duplicate_order",
+    "zero_quantity",
+    "negative_price",
+    "invalid_date",
+]
 
+SALES_SCHEMA = StructType([
+    StructField("order_id", IntegerType(), True),
+    StructField("customer_id", IntegerType(), True),
+    StructField("order_date", DateType(), True),
+    StructField("product", StringType(), True),
+    StructField("quantity", IntegerType(), True),
+    StructField("unit_price", DoubleType(), True),
+    StructField("region", StringType(), True),
+])
 
 
 def validate_data(df):
@@ -41,16 +49,10 @@ def validate_data(df):
     print("\n========== DATA QUALITY CHECKS ==========")
 
     critical_columns = [
-        "order_id",
-        "customer_id",
-        "order_date",
-        "product",
-        "quantity",
-        "unit_price",
-        "region",
+        "order_id", "customer_id", "order_date",
+        "product", "quantity", "unit_price", "region",
     ]
 
-    # Build all validation metrics into one aggregation.
     validation_expressions = []
 
     for column in critical_columns:
@@ -63,30 +65,24 @@ def validate_data(df):
     validation_expressions.extend([
         count("order_id").alias("total_order_ids"),
         countDistinct("order_id").alias("distinct_order_ids"),
-
         spark_sum(
             when(col("quantity") <= 0, 1).otherwise(0)
         ).alias("invalid_quantities"),
-
         spark_sum(
             when(col("unit_price") < 0, 1).otherwise(0)
         ).alias("negative_prices"),
     ])
 
-    # One Spark action executes all aggregation expressions.
     metrics = df.agg(*validation_expressions).first()
-
     errors = []
 
     print("\n1. Checking null values...")
 
     for column in critical_columns:
-        null_count = metrics[f"null_{column}"]
+        null_count = metrics[f"null_{column}"] or 0
 
         if null_count > 0:
-            errors.append(
-                f"{column}: {null_count} null values found"
-            )
+            errors.append(f"{column}: {null_count} null values found")
             print(f"   FAILED: {column} has {null_count} null values")
         else:
             print(f"   PASSED: {column}")
@@ -98,33 +94,27 @@ def validate_data(df):
     )
 
     if duplicate_count > 0:
-        errors.append(
-            f"{duplicate_count} duplicate order ID occurrences found"
-        )
+        errors.append(f"{duplicate_count} duplicate order ID occurrences found")
         print(f"   FAILED: {duplicate_count} duplicate occurrences")
     else:
         print("   PASSED: No duplicate order IDs")
 
     print("\n3. Checking quantities...")
 
-    invalid_quantity = metrics["invalid_quantities"]
+    invalid_quantity = metrics["invalid_quantities"] or 0
 
     if invalid_quantity > 0:
-        errors.append(
-            f"{invalid_quantity} invalid quantities found"
-        )
+        errors.append(f"{invalid_quantity} invalid quantities found")
         print(f"   FAILED: {invalid_quantity} invalid quantities")
     else:
         print("   PASSED: All quantities are valid")
 
     print("\n4. Checking unit prices...")
 
-    invalid_price = metrics["negative_prices"]
+    invalid_price = metrics["negative_prices"] or 0
 
     if invalid_price > 0:
-        errors.append(
-            f"{invalid_price} negative unit prices found"
-        )
+        errors.append(f"{invalid_price} negative unit prices found")
         print(f"   FAILED: {invalid_price} negative prices")
     else:
         print("   PASSED: All unit prices are valid")
@@ -137,31 +127,38 @@ def validate_data(df):
         for error in errors:
             print(f"- {error}")
 
-        raise ValueError(
-            "Pipeline stopped due to data quality issues."
-        )
+        raise ValueError("Pipeline stopped due to data quality issues.")
 
     print("\nALL DATA QUALITY CHECKS PASSED!")
     print("==========================================\n")
 
 
-def run_pipeline():
+def run_pipeline(scenario="clean"):
+
+    input_file = SIMULATED_DIR / scenario / "sales.csv"
+    output_dir = OUTPUT_DIR / scenario
+
+    if not input_file.exists():
+        raise FileNotFoundError(f"Dataset not found: {input_file}")
 
     spark = (
-        SparkSession.builder.master("local[*]").appName("PipeSage-ETL").getOrCreate()
+        SparkSession.builder
+        .master("local[*]")
+        .appName("PipeSage-ETL")
+        .getOrCreate()
     )
 
     spark.sparkContext.setLogLevel("ERROR")
 
     try:
-        print("Starting sales ETL pipeline...")
+        print(f"Starting sales ETL pipeline | Scenario: {scenario}")
 
         # 1. EXTRACT
         sales_df = (
             spark.read.option("header", True)
             .option("dateFormat", "yyyy-MM-dd")
             .schema(SALES_SCHEMA)
-            .csv(str(INPUT_FILE))
+            .csv(str(input_file))
         )
 
         print(f"\nExtracted records: {sales_df.count()}")
@@ -179,10 +176,10 @@ def run_pipeline():
         # 4. LOAD
         print("Loading transformed data...")
 
-        transformed_df.write.mode("overwrite").parquet(str(OUTPUT_DIR))
+        transformed_df.write.mode("overwrite").parquet(str(output_dir))
 
-        print(f"\nPipeline completed successfully!")
-        print(f"Output location: {OUTPUT_DIR}")
+        print("\nPipeline completed successfully!")
+        print(f"Output location: {output_dir}")
 
         transformed_df.show(truncate=False)
 
@@ -191,4 +188,12 @@ def run_pipeline():
 
 
 if __name__ == "__main__":
-    run_pipeline()
+    parser = argparse.ArgumentParser(description="PipeSage ETL Pipeline")
+    parser.add_argument(
+        "--scenario",
+        choices=SCENARIOS,
+        default="clean",
+    )
+
+    args = parser.parse_args()
+    run_pipeline(args.scenario)

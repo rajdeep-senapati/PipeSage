@@ -1,8 +1,9 @@
+import argparse
 import csv
 from pathlib import Path
 
-OUTPUT_DIR = Path("data")
-OUTPUT_FILE = OUTPUT_DIR / "sales.csv"
+BASE_DIR = Path(__file__).resolve().parents[2]
+OUTPUT_DIR = BASE_DIR / "data" / "simulated"
 
 SALES_DATA = [
     (1, 101, "2026-10-01", "Laptop", 1, 55000.00, "East"),
@@ -18,26 +19,43 @@ SALES_DATA = [
 ]
 
 COLUMNS = [
-    "order_id",
-    "customer_id",
-    "order_date",
-    "product",
-    "quantity",
-    "unit_price",
-    "region",
+    "order_id", "customer_id", "order_date",
+    "product", "quantity", "unit_price", "region",
 ]
 
+def generate_sales_data(scenario="clean"):
+    data = [list(row) for row in SALES_DATA]
 
-def generate_sales_data():
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    if scenario == "null_customer":
+        data[0][1] = ""
+    elif scenario == "duplicate_order":
+        data.append(data[0].copy())
+    elif scenario == "zero_quantity":
+        data[1][4] = 0
+    elif scenario == "negative_price":
+        data[2][5] = -1800.00
+    elif scenario == "invalid_date":
+        data[3][2] = "not-a-date"
 
-    with OUTPUT_FILE.open("w", newline="", encoding="utf-8") as file:
+    output_file = OUTPUT_DIR / scenario / "sales.csv"
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    with output_file.open("w", newline="", encoding="utf-8") as file:
         writer = csv.writer(file)
         writer.writerow(COLUMNS)
-        writer.writerows(SALES_DATA)
+        writer.writerows(data)
 
-    print(f"Generated {len(SALES_DATA)} sales records: {OUTPUT_FILE}")
-
+    print(f"Generated {len(data)} records for '{scenario}': {output_file}")
 
 if __name__ == "__main__":
-    generate_sales_data()
+    parser = argparse.ArgumentParser(description="PipeSage failure simulator")
+    parser.add_argument(
+        "--scenario",
+        choices=[
+            "clean", "null_customer", "duplicate_order",
+            "zero_quantity", "negative_price", "invalid_date",
+        ],
+        default="clean",
+    )
+    args = parser.parse_args()
+    generate_sales_data(args.scenario)
