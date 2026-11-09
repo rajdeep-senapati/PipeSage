@@ -3,6 +3,7 @@ import argparse
 import logging
 from pathlib import Path
 import time
+import json
 
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
@@ -25,6 +26,7 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 INPUT_FILE = BASE_DIR / "data" / "sales.csv"
 OUTPUT_DIR = BASE_DIR / "data" / "processed_sales"
 SIMULATED_DIR = BASE_DIR / "data" / "simulated"
+VALIDATION_CONFIG = BASE_DIR / "config" / "validation_rules.json"
 
 SCENARIOS = [
     "clean",
@@ -59,93 +61,164 @@ def configure_logging():
 
 
 def validate_data(df):
-    """Validate incoming sales data using a single Spark aggregation."""
+    """Validate incoming data using configurable JSON rules."""
 
-    logger.info("Starting data quality validation")
+    logger.info("Starting config-driven data quality validation")
 
-    critical_columns = [
-        "order_id", "customer_id", "order_date",
-        "product", "quantity", "unit_price", "region",
-    ]
-
-    validation_expressions = []
-
-    for column in critical_columns:
-        validation_expressions.append(
-            spark_sum(
-                when(col(column).isNull(), 1).otherwise(0)
-            ).alias(f"null_{column}")
+    if not VALIDATION_CONFIG.exists():
+        raise FileNotFoundError(
+            f"Validation configuration not found: {VALIDATION_CONFIG}"
         )
 
-    validation_expressions.extend([
-        count("order_id").alias("total_order_ids"),
-        countDistinct("order_id").alias("distinct_order_ids"),
-        spark_sum(
-            when(col("quantity") <= 0, 1).otherwise(0)
-        ).alias("invalid_quantities"),
-        spark_sum(
-            when(col("unit_price") < 0, 1).otherwise(0)
-        ).alias("negative_prices"),
-    ])
+    try:
+        with open(VALIDATION_CONFIG, "r", encoding="utf-8") as file:
+            config = json.load(file)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Invalid validation configuration: {exc}"
+        ) from exc
 
-    metrics = df.agg(*validation_expressions).first()
+    if not isinstance(config, dict):
+        raise ValueError("Validation configuration must be a JSON object.")
+
+    rules = config.get("rules")
+
+    if not isinstance(rules, list):
+        raise ValueError(
+            "Validation configuration must contain a rules list."
+        )
+
+    supported_checks = {
+        "not_null",
+        "unique",
+        "positive",
+        "non_negative",
+    }
+
+    validated_rules = []
+
+    # Validate the complete configuration before using Spark.
+    for rule in rules:
+        if not isinstance(rule, dict):
+            raise ValueError(f"Invalid validation rule: {rule}")
+
+        column = rule.get("column")
+        checks = rule.get("checks")
+
+        if not isinstance(column, str) or not column:
+            raise ValueError(
+                f"Invalid column in validation rule: {rule}"
+            )
+
+        if not isinstance(checks, list):
+            raise ValueError(
+                f"Invalid checks for column: {column}"
+            )
+
+        if column not in df.columns:
+            raise ValueError(
+                f"Validation column does not exist: {column}"
+            )
+
+        for check in checks:
+            if not isinstance(check, str) or check not in supported_checks:
+                raise ValueError(
+                    f"Unsupported validation check: {check}"
+                )
+
+        validated_rules.append((column, checks))
+
+    # Build Spark expressions after configuration validation.
+    expressions = []
+    rule_metadata = []
+
+    for index, (column, checks) in enumerate(validated_rules):
+        for check_index, check in enumerate(checks):
+            alias = f"rule_{index}_{check_index}"
+            column_expr = col(column)
+
+            if check == "not_null":
+                expressions.append(
+                    count(
+                        when(column_expr.isNull(), 1)
+                    ).alias(alias)
+                )
+
+                rule_metadata.append((alias, column, check))
+
+            elif check == "unique":
+                expressions.extend([
+                    count(column_expr).alias(f"{alias}_count"),
+                    countDistinct(column_expr).alias(
+                        f"{alias}_distinct"
+                    ),
+                ])
+
+                rule_metadata.append((alias, column, check))
+
+            elif check == "positive":
+                expressions.append(
+                    count(
+                        when(column_expr <= 0, 1)
+                    ).alias(alias)
+                )
+
+                rule_metadata.append((alias, column, check))
+
+            elif check == "non_negative":
+                expressions.append(
+                    count(
+                        when(column_expr < 0, 1)
+                    ).alias(alias)
+                )
+
+                rule_metadata.append((alias, column, check))
+
+    # Execute all validation checks in one Spark aggregation.
+    if not expressions:
+        logger.info("No validation checks configured")
+        return
+
+    results = df.agg(*expressions).first().asDict()
+
     errors = []
 
-    logger.info("Checking null values")
-
-    for column in critical_columns:
-        null_count = metrics[f"null_{column}"] or 0
-
-        if null_count > 0:
-            errors.append(f"{column}: {null_count} null values found")
-            logger.warning("%s has %s null values", column, null_count)
+    for alias, column, check in rule_metadata:
+        if check == "unique":
+            invalid_count = (
+                results[f"{alias}_count"]
+                - results[f"{alias}_distinct"]
+            )
         else:
-            logger.info("Null check passed: %s", column)
+            invalid_count = results[alias]
 
-    logger.info("Checking duplicate order IDs")
+        if invalid_count > 0:
+            errors.append(
+                f"{column}: {check} failed for {invalid_count} records"
+            )
 
-    duplicate_count = (
-        metrics["total_order_ids"] - metrics["distinct_order_ids"]
-    )
-
-    if duplicate_count > 0:
-        errors.append(
-            f"{duplicate_count} duplicate order ID occurrences found"
-        )
-        logger.warning("%s duplicate order ID occurrences found", duplicate_count)
-    else:
-        logger.info("Duplicate order ID check passed")
-
-    logger.info("Checking quantities")
-
-    invalid_quantity = metrics["invalid_quantities"] or 0
-
-    if invalid_quantity > 0:
-        errors.append(f"{invalid_quantity} invalid quantities found")
-        logger.warning("%s invalid quantities found", invalid_quantity)
-    else:
-        logger.info("Quantity check passed")
-
-    logger.info("Checking unit prices")
-
-    invalid_price = metrics["negative_prices"] or 0
-
-    if invalid_price > 0:
-        errors.append(f"{invalid_price} negative unit prices found")
-        logger.warning("%s negative unit prices found", invalid_price)
-    else:
-        logger.info("Unit price check passed")
+            logger.warning(
+                "Validation failed | Column: %s | Rule: %s | Count: %s",
+                column,
+                check,
+                invalid_count,
+            )
+        else:
+            logger.info(
+                "Validation passed | Column: %s | Rule: %s",
+                column,
+                check,
+            )
 
     if errors:
-        logger.error("Data quality validation failed")
-
         for error in errors:
             logger.error("Validation issue: %s", error)
 
-        raise ValueError("Pipeline stopped due to data quality issues.")
+        raise ValueError(
+            "Pipeline stopped due to data quality issues."
+        )
 
-    logger.info("All data quality checks passed")
-
+    logger.info("All configured data quality checks passed")
 
 
 def run_pipeline(scenario="clean", input_path=None, output_path=None):

@@ -4,6 +4,9 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, lit, when
 import subprocess
 import sys
+import json
+from unittest.mock import Mock
+import src.pipeline.transform as transform
 
 from src.pipeline.transform import (
     validate_data,
@@ -219,3 +222,53 @@ def test_cli_displays_clean_input_errors(tmp_path, filename, expected_error):
     assert result.returncode == 2
     assert expected_error in result.stderr
     assert "Traceback" not in result.stderr
+
+def test_unsupported_validation_rule_is_rejected(tmp_path, monkeypatch):
+    config_path = tmp_path / "validation_rules.json"
+    config_path.write_text(
+        json.dumps({
+            "rules": [{"column": "order_id", "checks": ["invalid_check"]}]
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(transform, "VALIDATION_CONFIG", config_path)
+
+    df = Mock()
+    df.columns = ["order_id"]
+
+    with pytest.raises(ValueError, match="Unsupported validation check"):
+        transform.validate_data(df)
+
+
+def test_missing_validation_column_is_rejected(tmp_path, monkeypatch):
+    config_path = tmp_path / "validation_rules.json"
+    config_path.write_text(
+        json.dumps({
+            "rules": [{"column": "missing_column", "checks": ["not_null"]}]
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(transform, "VALIDATION_CONFIG", config_path)
+
+    df = Mock()
+    df.columns = ["order_id"]
+
+    with pytest.raises(ValueError, match="column does not exist"):
+        transform.validate_data(df)
+
+
+def test_invalid_validation_json_is_rejected(tmp_path, monkeypatch):
+    config_path = tmp_path / "validation_rules.json"
+    config_path.write_text("{invalid json", encoding="utf-8")
+    monkeypatch.setattr(transform, "VALIDATION_CONFIG", config_path)
+
+    with pytest.raises(ValueError, match="Invalid validation configuration"):
+        transform.validate_data(Mock())
+
+
+def test_missing_validation_config_is_rejected(tmp_path, monkeypatch):
+    config_path = tmp_path / "missing.json"
+    monkeypatch.setattr(transform, "VALIDATION_CONFIG", config_path)
+
+    with pytest.raises(FileNotFoundError, match="Validation configuration not found"):
+        transform.validate_data(Mock())

@@ -1,0 +1,32 @@
+{
+  "rules": [
+    {
+      "column": "order_id",
+      "checks": ["not_null", "unique"]
+    },
+    {
+      "column": "customer_id",
+      "checks": ["not_null"]
+    },
+    {
+      "column": "order_date",
+      "checks": ["not_null"]
+    },
+    {
+      "column": "product",
+      "checks": ["not_null"]
+    },
+    {
+      "column": "quantity",
+      "checks": ["not_null", "positive"]
+    },
+    {
+      "column": "unit_price",
+      "checks": ["not_null", "non_negative"]
+    },
+    {
+      "column": "region",
+      "checks": ["not_null"]
+    }
+  ]
+}
