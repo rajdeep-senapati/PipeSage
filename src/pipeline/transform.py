@@ -2,6 +2,7 @@
 import argparse
 import logging
 from pathlib import Path
+import time
 
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
@@ -146,36 +147,48 @@ def validate_data(df):
     logger.info("All data quality checks passed")
 
 
-def run_pipeline(scenario="clean", input_path=None, output_path=None):
 
+def run_pipeline(scenario="clean", input_path=None, output_path=None):
+    start_time = time.perf_counter()
     input_file = (
-        Path(input_path)
+        Path(input_path).expanduser().resolve()
         if input_path
         else SIMULATED_DIR / scenario / "sales.csv"
     )
 
     output_dir = (
-        Path(output_path)
+        Path(output_path).expanduser().resolve()
         if output_path
         else OUTPUT_DIR / scenario
     )
 
     logger.info("Starting PipeSage ETL pipeline | Scenario: %s", scenario)
 
+    # Validate input before initializing Spark.
     if not input_file.exists():
-        logger.error("Dataset not found: %s", input_file)
         raise FileNotFoundError(f"Dataset not found: {input_file}")
 
-    spark = (
-        SparkSession.builder
-        .master("local[*]")
-        .appName("PipeSage-ETL")
-        .getOrCreate()
-    )
+    if not input_file.is_file():
+        raise ValueError(f"Input path is not a file: {input_file}")
 
-    spark.sparkContext.setLogLevel("ERROR")
+    if input_file.suffix.lower() != ".csv":
+        raise ValueError(f"Unsupported input format: {input_file.suffix}")
+
+    spark = None
 
     try:
+        # Initialize Spark
+        logger.info("Initializing Spark session")
+
+        spark = (
+            SparkSession.builder
+            .master("local[*]")
+            .appName("PipeSage-ETL")
+            .getOrCreate()
+        )
+
+        spark.sparkContext.setLogLevel("ERROR")
+
         # 1. EXTRACT
         logger.info("Extracting data from %s", input_file)
 
@@ -188,6 +201,9 @@ def run_pipeline(scenario="clean", input_path=None, output_path=None):
 
         record_count = sales_df.count()
         logger.info("Extraction completed | Records: %s", record_count)
+
+        if record_count == 0:
+            raise ValueError("Input dataset is empty.")
 
         # 2. VALIDATE
         validate_data(sales_df)
@@ -202,28 +218,42 @@ def run_pipeline(scenario="clean", input_path=None, output_path=None):
         logger.info("Transformation completed")
 
         # 4. LOAD
-        logger.info("Loading transformed data to %s", output_dir)
+        logger.info("Preparing output directory: %s", output_dir)
+
+        output_dir.parent.mkdir(parents=True, exist_ok=True)
+
+        logger.info("Loading transformed data")
 
         transformed_df.write.mode("overwrite").parquet(str(output_dir))
 
         logger.info("Pipeline completed successfully")
+        logger.info("Records processed: %s", record_count)
         logger.info("Output location: %s", output_dir)
 
         transformed_df.show(truncate=False)
 
+    except (FileNotFoundError, ValueError) as exc:
+        logger.error("Pipeline execution failed: %s", exc)
+        raise
+
     except Exception:
-        logger.exception("Pipeline execution failed")
+        logger.exception("Unexpected pipeline failure")
         raise
 
     finally:
-        spark.stop()
-        logger.info("Spark session stopped")
+        if spark is not None:
+            spark.stop()
+            logger.info("Spark session stopped")
+
+        elapsed_time = time.perf_counter() - start_time
+        logger.info("Total execution time: %.2f seconds", elapsed_time)
 
 
 if __name__ == "__main__":
     configure_logging()
 
     parser = argparse.ArgumentParser(description="PipeSage ETL Pipeline")
+
     parser.add_argument(
         "--scenario",
         choices=SCENARIOS,
@@ -231,20 +261,24 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-    "--input",
-    type=Path,
-    help="Custom input CSV file path",
+        "--input",
+        type=Path,
+        help="Custom input CSV file path",
     )
 
     parser.add_argument(
-    "--output",
-    type=Path,
-    help="Custom output directory path",
+        "--output",
+        type=Path,
+        help="Custom output directory path",
     )
 
     args = parser.parse_args()
-    run_pipeline(
-    scenario=args.scenario,
-    input_path=args.input,
-    output_path=args.output,
-    )
+
+    try:
+        run_pipeline(   
+            scenario=args.scenario,
+            input_path=args.input,
+            output_path=args.output,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        parser.error(str(exc))

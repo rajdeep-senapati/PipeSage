@@ -2,8 +2,15 @@ import pytest
 from src.simulator.generate_data import generate_sales_data
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, lit, when
+import subprocess
+import sys
 
-from src.pipeline.transform import validate_data, SALES_SCHEMA, INPUT_FILE
+from src.pipeline.transform import (
+    validate_data,
+    run_pipeline,
+    SALES_SCHEMA,
+    INPUT_FILE,
+)
 
 
 @pytest.fixture(scope="session")
@@ -147,3 +154,68 @@ def test_simulated_scenarios(spark, tmp_path, scenario, should_pass):
     else:
         with pytest.raises(ValueError, match="data quality issues"):
             validate_data(simulated_df)
+
+
+def test_missing_input_file_is_rejected(tmp_path):
+    missing_file = tmp_path / "missing.csv"
+
+    with pytest.raises(FileNotFoundError, match="Dataset not found"):
+        run_pipeline(input_path=missing_file)
+
+
+def test_input_directory_is_rejected(tmp_path):
+    input_directory = tmp_path / "input.csv"
+    input_directory.mkdir()
+
+    with pytest.raises(ValueError, match="not a file"):
+        run_pipeline(input_path=input_directory)
+
+
+def test_unsupported_input_format_is_rejected(tmp_path):
+    unsupported_file = tmp_path / "input.txt"
+    unsupported_file.write_text("unsupported content")
+
+    with pytest.raises(ValueError, match="Unsupported input format"):
+        run_pipeline(input_path=unsupported_file)
+
+
+def test_empty_csv_is_rejected(tmp_path):
+    empty_file = tmp_path / "empty.csv"
+    empty_file.write_text(
+        "order_id,customer_id,order_date,product,quantity,unit_price,region\n"
+    )
+
+    with pytest.raises(ValueError, match="Input dataset is empty"):
+        run_pipeline(
+            input_path=empty_file,
+            output_path=tmp_path / "output",
+        )
+
+@pytest.mark.parametrize(
+    "filename, expected_error",
+    [
+        ("missing.csv", "Dataset not found"),
+        ("unsupported.txt", "Unsupported input format"),
+    ],
+)
+def test_cli_displays_clean_input_errors(tmp_path, filename, expected_error):
+    input_file = tmp_path / filename
+
+    if filename == "unsupported.txt":
+        input_file.write_text("test")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "src.pipeline.transform",
+            "--input",
+            str(input_file),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert expected_error in result.stderr
+    assert "Traceback" not in result.stderr
