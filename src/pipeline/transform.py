@@ -1,4 +1,4 @@
-
+from datetime import datetime, timezone
 import argparse
 import logging
 from pathlib import Path
@@ -60,8 +60,8 @@ def configure_logging():
     )
 
 
-def validate_data(df):
-    """Validate incoming data using configurable JSON rules."""
+def evaluate_data_quality(df):
+    """Evaluate configured data-quality rules and return structured results."""
 
     logger.info("Starting config-driven data quality validation")
 
@@ -128,8 +128,9 @@ def validate_data(df):
 
         validated_rules.append((column, checks))
 
-    # Build Spark expressions after configuration validation.
-    expressions = []
+    expressions = [
+        count("*").alias("_total_records")
+    ]
     rule_metadata = []
 
     for index, (column, checks) in enumerate(validated_rules):
@@ -144,8 +145,6 @@ def validate_data(df):
                     ).alias(alias)
                 )
 
-                rule_metadata.append((alias, column, check))
-
             elif check == "unique":
                 expressions.extend([
                     count(column_expr).alias(f"{alias}_count"),
@@ -154,16 +153,12 @@ def validate_data(df):
                     ),
                 ])
 
-                rule_metadata.append((alias, column, check))
-
             elif check == "positive":
                 expressions.append(
                     count(
                         when(column_expr <= 0, 1)
                     ).alias(alias)
                 )
-
-                rule_metadata.append((alias, column, check))
 
             elif check == "non_negative":
                 expressions.append(
@@ -172,16 +167,14 @@ def validate_data(df):
                     ).alias(alias)
                 )
 
-                rule_metadata.append((alias, column, check))
+            rule_metadata.append((alias, column, check))
 
-    # Execute all validation checks in one Spark aggregation.
-    if not expressions:
-        logger.info("No validation checks configured")
-        return
-
+    # Execute all checks in one Spark aggregation.
     results = df.agg(*expressions).first().asDict()
 
-    errors = []
+    rule_results = []
+    passed_rules = []
+    failed_rules = []
 
     for alias, column, check in rule_metadata:
         if check == "unique":
@@ -192,11 +185,17 @@ def validate_data(df):
         else:
             invalid_count = results[alias]
 
-        if invalid_count > 0:
-            errors.append(
-                f"{column}: {check} failed for {invalid_count} records"
-            )
+        rule_result = {
+            "column": column,
+            "check": check,
+            "status": "passed" if invalid_count == 0 else "failed",
+            "invalid_count": invalid_count,
+        }
 
+        rule_results.append(rule_result)
+
+        if invalid_count > 0:
+            failed_rules.append(rule_result)
             logger.warning(
                 "Validation failed | Column: %s | Rule: %s | Count: %s",
                 column,
@@ -204,21 +203,67 @@ def validate_data(df):
                 invalid_count,
             )
         else:
+            passed_rules.append(rule_result)
             logger.info(
                 "Validation passed | Column: %s | Rule: %s",
                 column,
                 check,
             )
 
-    if errors:
-        for error in errors:
-            logger.error("Validation issue: %s", error)
+    report = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "total_records": results["_total_records"],
+        "overall_status": "passed" if not failed_rules else "failed",
+        "total_rules": len(rule_results),
+        "passed_rule_count": len(passed_rules),
+        "failed_rule_count": len(failed_rules),
+        "passed_rules": passed_rules,
+        "failed_rules": failed_rules,
+        "rule_results": rule_results,
+    }
+
+    logger.info(
+        "Data quality evaluation completed | Status: %s | Passed: %s | Failed: %s",
+        report["overall_status"],
+        report["passed_rule_count"],
+        report["failed_rule_count"],
+    )
+
+    return report
+
+
+def write_quality_report(report, report_path):
+    """Write a machine-readable data-quality report to JSON."""
+
+    report_path = Path(report_path)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(report_path, "w", encoding="utf-8") as file:
+        json.dump(report, file, indent=4)
+
+    logger.info("Data quality report saved: %s", report_path)
+
+
+def validate_data(df):
+    """Preserve the existing validation interface."""
+
+    report = evaluate_data_quality(df)
+
+    if report["failed_rules"]:
+        for rule in report["failed_rules"]:
+            logger.error(
+                "Validation issue: %s: %s failed for %s records",
+                rule["column"],
+                rule["check"],
+                rule["invalid_count"],
+            )
 
         raise ValueError(
             "Pipeline stopped due to data quality issues."
         )
 
     logger.info("All configured data quality checks passed")
+    return report
 
 
 def run_pipeline(scenario="clean", input_path=None, output_path=None):
@@ -278,8 +323,22 @@ def run_pipeline(scenario="clean", input_path=None, output_path=None):
         if record_count == 0:
             raise ValueError("Input dataset is empty.")
 
+        
         # 2. VALIDATE
-        validate_data(sales_df)
+        quality_report = evaluate_data_quality(sales_df)
+
+        report_path = (
+            output_dir.parent / f"{output_dir.name}_quality_report.json"
+        )
+
+        write_quality_report(quality_report, report_path)
+
+        if quality_report["failed_rules"]:
+            raise ValueError(
+            "Pipeline stopped due to data quality issues. "
+            f"See report: {report_path}"
+            )
+
 
         # 3. TRANSFORM
         logger.info("Starting data transformation")

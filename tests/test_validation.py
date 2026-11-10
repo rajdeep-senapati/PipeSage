@@ -16,7 +16,7 @@ from src.pipeline.transform import (
 )
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="function")
 def spark():
     session = (
         SparkSession.builder
@@ -29,7 +29,7 @@ def spark():
     session.stop()
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="function")
 def sales_df(spark):
     return (
         spark.read
@@ -272,3 +272,55 @@ def test_missing_validation_config_is_rejected(tmp_path, monkeypatch):
 
     with pytest.raises(FileNotFoundError, match="Validation configuration not found"):
         transform.validate_data(Mock())
+
+
+def test_quality_report_passes_for_valid_data(spark, sales_df):
+    report = transform.evaluate_data_quality(sales_df)
+
+    assert report["overall_status"] == "passed"
+    assert report["total_records"] == 10
+    assert report["failed_rule_count"] == 0
+    assert report["passed_rule_count"] == report["total_rules"]
+    assert report["failed_rules"] == []
+
+
+def test_quality_report_detects_invalid_records(spark, sales_df):
+    invalid_df = sales_df.withColumn(
+        "customer_id",
+        when(
+            col("order_id") == 1,
+            lit(None)
+        ).otherwise(col("customer_id"))
+    )
+
+    report = transform.evaluate_data_quality(invalid_df)
+
+    assert report["overall_status"] == "failed"
+    assert report["total_records"] == 10
+    assert report["failed_rule_count"] == 1
+
+    failed_rule = report["failed_rules"][0]
+
+    assert failed_rule["column"] == "customer_id"
+    assert failed_rule["check"] == "not_null"
+    assert failed_rule["invalid_count"] == 1
+
+
+def test_quality_report_is_written_as_json(tmp_path):
+    report = {
+        "overall_status": "passed",
+        "total_records": 10,
+        "passed_rule_count": 10,
+        "failed_rule_count": 0,
+    }
+
+    report_path = tmp_path / "quality_report.json"
+
+    transform.write_quality_report(report, report_path)
+
+    assert report_path.exists()
+
+    with open(report_path, "r", encoding="utf-8") as file:
+        saved_report = json.load(file)
+
+    assert saved_report == report
