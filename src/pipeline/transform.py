@@ -1,3 +1,5 @@
+from pyspark.sql import Window
+from pyspark.sql.functions import array, concat, lit, size
 from datetime import datetime, timezone
 import argparse
 import logging
@@ -244,6 +246,107 @@ def write_quality_report(report, report_path):
     logger.info("Data quality report saved: %s", report_path)
 
 
+def quarantine_invalid_records(df):
+    """Split valid and invalid records using configured quality rules."""
+
+    if not VALIDATION_CONFIG.exists():
+        raise FileNotFoundError(
+            f"Validation configuration not found: {VALIDATION_CONFIG}"
+        )
+
+    try:
+        with open(VALIDATION_CONFIG, "r", encoding="utf-8") as file:
+            config = json.load(file)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Invalid validation configuration: {exc}"
+        ) from exc
+
+    if not isinstance(config, dict) or not isinstance(config.get("rules"), list):
+        raise ValueError("Invalid validation configuration: rules must be a list.")
+
+    rules = config["rules"]
+    supported_checks = {"not_null", "unique", "positive", "non_negative"}
+
+    if "rejection_reasons" in df.columns:
+        raise ValueError(
+            "Input contains reserved column: rejection_reasons"
+        )
+
+    issues = array().cast("array<string>")
+
+    for rule in rules:
+        if not isinstance(rule, dict):
+            raise ValueError(f"Invalid validation rule: {rule}")
+
+        column = rule.get("column")
+        checks = rule.get("checks")
+
+        if not isinstance(column, str) or not column:
+            raise ValueError(f"Invalid validation column: {column}")
+
+        if column not in df.columns:
+            raise ValueError(f"Validation column does not exist: {column}")
+
+        if not isinstance(checks, list):
+            raise ValueError(f"Invalid checks for column: {column}")
+
+        for check in checks:
+            if check not in supported_checks:
+                raise ValueError(f"Unsupported validation check: {check}")
+
+            column_expr = col(column)
+
+            if check == "not_null":
+                invalid_condition = column_expr.isNull()
+
+            elif check == "unique":
+                duplicate_count = count("*").over(
+                    Window.partitionBy(column_expr)
+                )
+                invalid_condition = (
+                    column_expr.isNotNull() & (duplicate_count > 1)
+                )
+
+            elif check == "positive":
+                invalid_condition = column_expr <= 0
+
+            else:  # non_negative
+                invalid_condition = column_expr < 0
+
+            reason = f"{column}:{check}"
+
+            issues = concat(
+                issues,
+                when(
+                    invalid_condition,
+                    array(lit(reason))
+                ).otherwise(array().cast("array<string>"))
+            )
+
+    flagged_df = df.withColumn(
+        "__pipesage_quality_issues",
+        issues
+    )
+
+    accepted_df = (
+        flagged_df
+        .filter(size(col("__pipesage_quality_issues")) == 0)
+        .drop("__pipesage_quality_issues")
+    )
+
+    rejected_df = (
+        flagged_df
+        .filter(size(col("__pipesage_quality_issues")) > 0)
+        .withColumn(
+            "rejection_reasons",
+            col("__pipesage_quality_issues")
+        )
+        .drop("__pipesage_quality_issues")
+    )
+
+    return accepted_df, rejected_df
+
 def validate_data(df):
     """Preserve the existing validation interface."""
 
@@ -266,8 +369,12 @@ def validate_data(df):
     return report
 
 
+
 def run_pipeline(scenario="clean", input_path=None, output_path=None):
+    """Run the ETL pipeline and quarantine invalid records."""
+
     start_time = time.perf_counter()
+
     input_file = (
         Path(input_path).expanduser().resolve()
         if input_path
@@ -280,7 +387,10 @@ def run_pipeline(scenario="clean", input_path=None, output_path=None):
         else OUTPUT_DIR / scenario
     )
 
-    logger.info("Starting PipeSage ETL pipeline | Scenario: %s", scenario)
+    logger.info(
+        "Starting PipeSage ETL pipeline | Scenario: %s",
+        scenario,
+    )
 
     # Validate input before initializing Spark.
     if not input_file.exists():
@@ -295,7 +405,7 @@ def run_pipeline(scenario="clean", input_path=None, output_path=None):
     spark = None
 
     try:
-        # Initialize Spark
+        # INITIALIZE SPARK
         logger.info("Initializing Spark session")
 
         spark = (
@@ -311,58 +421,120 @@ def run_pipeline(scenario="clean", input_path=None, output_path=None):
         logger.info("Extracting data from %s", input_file)
 
         sales_df = (
-            spark.read.option("header", True)
+            spark.read
+            .option("header", True)
             .option("dateFormat", "yyyy-MM-dd")
             .schema(SALES_SCHEMA)
             .csv(str(input_file))
         )
 
         record_count = sales_df.count()
-        logger.info("Extraction completed | Records: %s", record_count)
+
+        logger.info(
+            "Extraction completed | Records: %s",
+            record_count,
+        )
 
         if record_count == 0:
             raise ValueError("Input dataset is empty.")
 
-        
-        # 2. VALIDATE
+        # 2. VALIDATE AND QUARANTINE
+        logger.info("Evaluating data quality")
+
         quality_report = evaluate_data_quality(sales_df)
 
+        accepted_df, rejected_df = quarantine_invalid_records(
+            sales_df
+        )
+
+        accepted_count = accepted_df.count()
+        rejected_count = rejected_df.count()
+
+        quality_report.update({
+            "accepted_records": accepted_count,
+            "rejected_records": rejected_count,
+            "rejection_rate": round(
+                rejected_count / record_count,
+                4,
+            ),
+            "pipeline_status": (
+                "completed_with_quarantine"
+                if rejected_count > 0
+                else "completed"
+            ),
+        })
+
+        logger.info(
+            "Validation completed | Accepted: %s | Rejected: %s",
+            accepted_count,
+            rejected_count,
+        )
+
+        # SAVE QUALITY REPORT
         report_path = (
-            output_dir.parent / f"{output_dir.name}_quality_report.json"
+            output_dir.parent
+            / f"{output_dir.name}_quality_report.json"
         )
 
         write_quality_report(quality_report, report_path)
 
-        if quality_report["failed_rules"]:
-            raise ValueError(
-            "Pipeline stopped due to data quality issues. "
-            f"See report: {report_path}"
-            )
+        # 3. TRANSFORM ACCEPTED RECORDS
+        logger.info("Transforming accepted records")
 
-
-        # 3. TRANSFORM
-        logger.info("Starting data transformation")
-
-        transformed_df = sales_df.withColumn(
-            "total_amount", col("quantity") * col("unit_price")
+        transformed_df = accepted_df.withColumn(
+            "total_amount",
+            col("quantity") * col("unit_price"),
         )
 
         logger.info("Transformation completed")
 
-        # 4. LOAD
-        logger.info("Preparing output directory: %s", output_dir)
+        # 4. LOAD ACCEPTED RECORDS
+        logger.info("Saving accepted records")
 
-        output_dir.parent.mkdir(parents=True, exist_ok=True)
+        output_dir.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
 
-        logger.info("Loading transformed data")
+        transformed_df.write.mode("overwrite").parquet(
+            str(output_dir)
+        )
 
-        transformed_df.write.mode("overwrite").parquet(str(output_dir))
+        logger.info(
+            "Accepted records saved: %s",
+            output_dir,
+        )
 
-        logger.info("Pipeline completed successfully")
-        logger.info("Records processed: %s", record_count)
-        logger.info("Output location: %s", output_dir)
+        # 5. LOAD QUARANTINED RECORDS
+        quarantine_dir = (
+            output_dir.parent
+            / f"{output_dir.name}_quarantine"
+        )
+
+        logger.info("Saving quarantined records")
+
+        rejected_df.write.mode("overwrite").parquet(
+            str(quarantine_dir)
+        )
+
+        logger.info(
+            "Quarantined records saved: %s",
+            quarantine_dir,
+        )
+
+        # 6. FINAL PIPELINE SUMMARY
+        logger.info(
+            "Pipeline completed | Total: %s | Accepted: %s | Rejected: %s",
+            record_count,
+            accepted_count,
+            rejected_count,
+        )
+
+        logger.info("Quality report: %s", report_path)
 
         transformed_df.show(truncate=False)
+
+        return quality_report
 
     except (FileNotFoundError, ValueError) as exc:
         logger.error("Pipeline execution failed: %s", exc)
@@ -378,8 +550,11 @@ def run_pipeline(scenario="clean", input_path=None, output_path=None):
             logger.info("Spark session stopped")
 
         elapsed_time = time.perf_counter() - start_time
-        logger.info("Total execution time: %.2f seconds", elapsed_time)
 
+        logger.info(
+            "Total execution time: %.2f seconds",
+            elapsed_time,
+        )
 
 if __name__ == "__main__":
     configure_logging()
