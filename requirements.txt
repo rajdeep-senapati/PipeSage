@@ -2,3 +2,4 @@ pyspark
 pandas
 pytest
 python-dotenv
+mcp==1.30.0
