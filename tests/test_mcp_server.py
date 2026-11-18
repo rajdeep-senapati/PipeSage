@@ -46,6 +46,7 @@ def test_get_pipeline_metrics(tmp_path, monkeypatch):
         "accepted_records": 9,
         "rejected_records": 1,
         "rejection_rate": 0.1,
+        "execution_duration_seconds": 2.456,
         "total_rules": 10,
         "passed_rule_count": 9,
         "failed_rule_count": 1,
@@ -62,7 +63,8 @@ def test_get_pipeline_metrics(tmp_path, monkeypatch):
     assert result["rejected_records"] == 1
     assert result["rejection_rate"] == 0.1
     assert result["failed_rule_count"] == 1
-
+    assert result["execution_duration_seconds"] == 2.456
+    
 
 def test_get_quality_report_rejects_invalid_scenario():
     import pytest

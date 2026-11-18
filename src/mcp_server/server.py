@@ -152,6 +152,7 @@ def get_pipeline_metrics(scenario: str = "clean") -> dict:
         "accepted_records",
         "rejected_records",
         "rejection_rate",
+        "execution_duration_seconds",
         "total_rules",
         "passed_rule_count",
         "failed_rule_count",

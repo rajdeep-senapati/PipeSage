@@ -534,6 +534,21 @@ def run_pipeline(scenario="clean", input_path=None, output_path=None):
 
         transformed_df.show(truncate=False)
 
+        # 7. RECORD PIPELINE EXECUTION METRICS
+        execution_duration = round(
+            time.perf_counter() - start_time,
+            3,
+        )
+
+        quality_report["execution_duration_seconds"] = execution_duration
+
+        write_quality_report(quality_report, report_path)
+
+        logger.info(
+            "Pipeline execution duration: %.3f seconds",
+            execution_duration,
+        )
+
         return quality_report
 
     except (FileNotFoundError, ValueError) as exc:
