@@ -1,20 +1,22 @@
 # PipeSage
 
-**A PySpark ETL pipeline with configurable data-quality checks, invalid-record quarantine, and failure simulation.**
+**An MCP-enabled PySpark ETL and data-quality platform with configurable validation, invalid-record quarantine, pipeline observability, and AI assistant integration.**
 
-PipeSage demonstrates a practical data-engineering workflow: generate or ingest sales data, validate it against configurable rules, separate invalid records, transform accepted rows, and produce machine-readable quality reports.
+PipeSage demonstrates a practical data-engineering workflow: ingest sales data, validate records against configurable rules, separate invalid records, transform accepted data, and generate machine-readable quality reports.
 
-> **Project status:** The PySpark ETL, validation, quarantine, and failure-simulation workflow is implemented. MCP server integration is a planned next milestone and is not yet included in the current codebase.
+It also exposes pipeline capabilities through a **Model Context Protocol (MCP) server**, allowing AI assistants such as GitHub Copilot to execute pipelines, inspect validation results, and retrieve operational metrics through tools and resources.
 
 ## Features
 
-- **PySpark ETL:** Reads CSV sales data with an explicit schema, transforms accepted records, and writes Parquet output.
-- **Config-driven validation:** Quality rules are maintained in `config/validation_rules.json`, separate from pipeline code.
-- **Data-quality reporting:** Produces JSON reports with record counts, rule-level results, pass/fail status, and rejection rate.
-- **Invalid-record quarantine:** Keeps accepted and rejected records separate. Rejected rows include a `rejection_reasons` array identifying the failed checks.
+- **PySpark ETL:** Reads CSV sales data using an explicit schema, transforms accepted records, and writes Parquet output.
+- **Config-driven validation:** Quality rules are maintained in `config/validation_rules.json`, separately from pipeline logic.
+- **Invalid-record quarantine:** Separates accepted and rejected records. Rejected rows include a `rejection_reasons` array identifying failed checks.
+- **Data-quality reporting:** Generates JSON reports containing record counts, rule-level results, validation status, and rejection rates.
+- **Pipeline observability:** Tracks execution duration and reports pipeline metrics.
 - **Failure simulation:** Generates datasets containing common data-quality issues for repeatable testing.
-- **Input safeguards and logging:** Checks input paths and file formats and records pipeline execution details.
-- **Automated tests:** Uses pytest to test validation, simulation, reporting, and pipeline behavior.
+- **MCP server integration:** Exposes pipeline operations through five MCP tools and two MCP resources.
+- **AI assistant integration:** Enables MCP-compatible clients to execute pipeline operations and interpret data-quality results.
+- **Automated testing:** Uses pytest for validation, pipeline, and MCP integration tests.
 
 ## Architecture
 
@@ -23,11 +25,28 @@ flowchart TD
     A[Sales CSV] --> B[PySpark Extraction]
     B --> C[Config-driven Quality Checks]
     C --> D{Record-level Validation}
-    D -->|Valid| E[Transform accepted records]
-    D -->|Invalid| F[Quarantine with rejection reasons]
+
+    D -->|Valid| E[Transform Accepted Records]
+    D -->|Invalid| F[Quarantine with Rejection Reasons]
+
     E --> G[Processed Parquet]
     F --> H[Quarantine Parquet]
+
     C --> I[JSON Quality Report]
+    B --> J[Pipeline Metrics]
+
+    subgraph MCP Layer
+        K[MCP Server]
+        L[Five MCP Tools]
+        M[Two MCP Resources]
+        K --> L
+        K --> M
+    end
+
+    N[AI Assistant / MCP Client] <--> K
+    L --> B
+    M --> I
+    M --> J
 ```
 
 ## Tech stack
@@ -35,6 +54,9 @@ flowchart TD
 - Python
 - Apache Spark / PySpark
 - Pandas
+- Model Context Protocol (MCP)
+- FastMCP
+- Pydantic
 - pytest
 
 ## Project structure
@@ -49,14 +71,20 @@ PipeSage/
 ├── src/
 │   ├── pipeline/
 │   │   └── transform.py
-│   └── simulator/
-│       └── generate_data.py
+│   ├── simulator/
+│   │   └── generate_data.py
+│   └── mcp_server/
+│       └── server.py
 ├── tests/
+│   ├── test_validation.py
+│   └── test_mcp_server.py
+├── .vscode/
+│   └── mcp.json
 ├── requirements.txt
 └── README.md
 ```
 
-Generated datasets and pipeline outputs are runtime artifacts; they are not required to be committed to the repository.
+Generated datasets and pipeline outputs are runtime artifacts and do not need to be committed to the repository.
 
 ## Getting started
 
@@ -104,11 +132,15 @@ Run the ETL pipeline:
 python -m src.pipeline.transform --scenario clean
 ```
 
-The pipeline reads the generated CSV from `data/simulated/clean/sales.csv`.
+The pipeline reads the generated CSV from:
+
+```text
+data/simulated/clean/sales.csv
+```
 
 ### Simulate data-quality failures
 
-The simulator supports these scenarios:
+The simulator supports the following scenarios:
 
 | Scenario | Injected issue |
 |---|---|
@@ -120,32 +152,105 @@ The simulator supports these scenarios:
 | `invalid_date` | Invalid date value |
 | `negative_quantity` | Negative quantity |
 
-For example, to generate and process a dataset with a missing customer ID:
+For example:
 
 ```bash
-python -m src.simulator.generate_data --scenario null_customer
-python -m src.pipeline.transform --scenario null_customer
+python -m src.simulator.generate_data --scenario negative_price
+python -m src.pipeline.transform --scenario negative_price
 ```
 
 ### Custom input and output paths
 
-The pipeline also accepts a custom CSV input and output directory:
+The pipeline also accepts custom CSV input and output paths:
 
 ```bash
 python -m src.pipeline.transform --input path/to/sales.csv --output path/to/output
 ```
 
+## MCP server integration
+
+PipeSage exposes its data-engineering capabilities through an MCP server built with FastMCP.
+
+Start the server:
+
+```bash
+python -m src.mcp_server.server
+```
+
+The server uses standard input/output (`stdio`) transport, allowing compatible MCP clients to communicate with it.
+
+### Available MCP tools
+
+| Tool | Description |
+|---|---|
+| `run_pipeline` | Executes the ETL pipeline for a selected scenario. |
+| `validate_dataset` | Validates a CSV dataset against configured quality rules. |
+| `get_quality_report` | Retrieves a saved data-quality report. |
+| `get_pipeline_metrics` | Retrieves pipeline execution and quality metrics. |
+| `list_failure_scenarios` | Lists the available failure-simulation scenarios. |
+
+### Available MCP resources
+
+| Resource URI | Description |
+|---|---|
+| `pipesage://validation-rules` | Exposes the configured validation rules. |
+| `pipesage://quality-report/{scenario}` | Exposes a quality report for a selected scenario. |
+
+### Example AI assistant interaction
+
+An MCP-compatible assistant can be asked:
+
+```text
+Run the negative_price scenario using PipeSage.
+Explain the pipeline status, accepted records, quarantined records,
+and the validation rules that failed.
+```
+
+Example result:
+
+```text
+Pipeline status: completed_with_quarantine
+Overall validation status: failed
+Total records: 10
+Accepted records: 9
+Quarantined records: 1
+Validation rules passed: 9
+Validation rules failed: 1
+
+Failed rule: unit_price.non_negative
+```
+
+This demonstrates how an AI assistant can invoke an actual data pipeline and interpret its returned quality results through MCP.
+
+## Pipeline observability
+
+Each pipeline execution generates operational and data-quality information, including:
+
+- Total records processed
+- Accepted and rejected records
+- Rejection rate
+- Passed and failed validation rules
+- Overall validation status
+- Pipeline execution status
+- Execution duration in seconds
+
+The `execution_duration_seconds` metric records pipeline execution through the output-writing and display stages, before Spark session shutdown.
+
 ## Outputs
 
-For a scenario named `null_customer`, the default output locations are:
+For a scenario named `negative_price`, the default output locations are:
 
 | Artifact | Location |
 |---|---|
-| Accepted, transformed records | `data/processed_sales/null_customer/` |
-| Quarantined records | `data/processed_sales/null_customer_quarantine/` |
-| Quality report | `data/processed_sales/null_customer_quality_report.json` |
+| Accepted, transformed records | `data/processed_sales/negative_price/` |
+| Quarantined records | `data/processed_sales/negative_price_quarantine/` |
+| Quality report | `data/processed_sales/negative_price_quality_report.json` |
 
-The accepted dataset is written in Parquet format. The quarantine dataset retains the original columns and adds `rejection_reasons`. The JSON report includes total, accepted, and rejected record counts, rejection rate, and per-rule validation results.
+The accepted dataset is written in Parquet format.
+
+The quarantine dataset retains the original columns and adds `rejection_reasons`.
+
+The JSON quality report includes record counts, rejection rate, validation results, pipeline status, and execution duration.
 
 ## Configure validation rules
 
@@ -153,10 +258,10 @@ Edit `config/validation_rules.json` to define checks for dataset columns.
 
 Supported checks:
 
-- `not_null`: rejects null values.
-- `unique`: detects repeated non-null values.
-- `positive`: rejects values less than or equal to zero.
-- `non_negative`: rejects values below zero.
+- `not_null`: Rejects null values.
+- `unique`: Detects repeated non-null values.
+- `positive`: Rejects values less than or equal to zero.
+- `non_negative`: Rejects values below zero.
 
 Example:
 
@@ -179,16 +284,18 @@ The configured rules are used for both quality evaluation and record quarantine.
 
 ## Run tests
 
+Run the complete test suite:
+
 ```bash
 python -m pytest -v
 ```
 
-## Roadmap
-
-- Add an MCP server that exposes the existing PipeSage engine as tools and resources.
-- Add end-to-end MCP client integration and interaction examples.
-- Expand integration coverage and operational observability.
+The project currently includes **34 automated tests**, covering pipeline validation and MCP integration.
 
 ## Why PipeSage?
 
-PipeSage is a hands-on data-engineering project focused on reliable ingestion, explicit data-quality rules, explainable record rejection, and reproducible pipeline behavior. Its planned MCP layer will make these existing capabilities accessible to AI assistants through a standard tool interface.
+PipeSage combines practical data engineering with AI interoperability.
+
+It demonstrates how to build a data pipeline that does more than process records: it validates data, explains rejected records, tracks execution metrics, and exposes its capabilities to AI assistants through a standard tool interface.
+
+By combining PySpark, configurable data-quality checks, observability, and MCP, PipeSage bridges traditional data engineering workflows with agentic AI applications.
